@@ -213,6 +213,7 @@ void loop() {
     static bool last_finger_down = false;
     static int last_x = 0;
     static int last_y = 0;
+    static int last_w = -1;
     static uint8_t last_buttons = 0;
 
     // Timeout resync
@@ -232,76 +233,80 @@ void loop() {
         pkt_idx++;
         
         if (pkt_idx == 6) {
-            bool physical_left = packet[0] & 0x01;
+            bool physical_left = packet[0] & 0x02; // Bit 1 is Left
+            bool physical_right = packet[0] & 0x01; // Bit 0 is Right
+            
             int x = packet[4] | ((packet[1] & 0x0F) << 8) | ((packet[3] & 0x10) << 8);
             int y = packet[5] | ((packet[1] & 0xF0) << 4) | ((packet[3] & 0x20) << 7);
             int z = packet[2];
             int w = ((packet[0] & 0x30) >> 2) | ((packet[0] & 0x04) >> 1) | ((packet[3] & 0x04) >> 2);
             
             uint8_t buttons = 0;
-            if (physical_left || digitalRead(BUTTON_PIN) == LOW) {
-                buttons |= MOUSE_BUTTON_LEFT;
-            }
+            if (physical_left || digitalRead(BUTTON_PIN) == LOW) buttons |= MOUSE_BUTTON_LEFT;
+            if (physical_right) buttons |= MOUSE_BUTTON_RIGHT;
+            
+            // Z Hysteresis: Prevent micro-bounces when touching lightly
+            bool is_touching = (z > 30) || (last_finger_down && z > 15);
             
             // Update global vars for LCD Core 1
-            if (z > 30) {
+            if (is_touching) {
                 diag_x = x;
                 diag_y = 5924 - y;
                 diag_z = z;
                 diag_w = w;
                 
-                if (last_finger_down) {
+                // Only move if we didn't just add/remove a finger (w changed) 
+                if (last_finger_down && w == last_w) {
                     int dx = x - last_x;
                     int dy = y - last_y; // Y is bottom-to-top natively from trackpad
                     
-                    static float dx_accumulator = 0.0;
-                    static float dy_accumulator = 0.0;
-                    static int scroll_accumulator = 0;
-                    
-                    if (usb_hid.ready()) {
-                        if (w == 0 || w == 1) {
-                            // 2 or 3 fingers -> Scroll
-                            scroll_accumulator += (-dy); 
-                            
-                            int scroll = 0;
-                            int scroll_threshold = 120;
-                            
-                            if (scroll_accumulator >= scroll_threshold) {
-                                scroll = 1;
-                                scroll_accumulator -= scroll_threshold;
-                            } else if (scroll_accumulator <= -scroll_threshold) {
-                                scroll = -1;
-                                scroll_accumulator += scroll_threshold;
-                            }
-                            
-                            if (scroll != 0) {
-                                usb_hid.mouseReport(1, buttons, 0, 0, scroll, 0);
-                            }
-                            
-                            // Reset movement accumulators when scrolling
-                            dx_accumulator = 0.0;
-                            dy_accumulator = 0.0;
-                        } else {
-                            // 1 finger -> Move
-                            scroll_accumulator = 0; // Reset scroll when moving
-                            
-                            // Accumulate fractional movement for extremely high precision
-                            // Dividing by 3.0 gives the DPI we want, but saves the sub-pixel data!
-                            dx_accumulator += (float)dx / 3.0f;
-                            dy_accumulator += (float)(-dy) / 3.0f;
-                            
-                            int send_dx = (int)dx_accumulator;
-                            int send_dy = (int)dy_accumulator;
-                            
-                            // Remove the integer part we are about to send, keep the fraction
-                            dx_accumulator -= send_dx;
-                            dy_accumulator -= send_dy;
-                            
-                            send_dx = max(-127, min(127, send_dx));
-                            send_dy = max(-127, min(127, send_dy));
-                            
-                            if (send_dx != 0 || send_dy != 0 || buttons != last_buttons) {
-                                usb_hid.mouseReport(1, buttons, send_dx, send_dy, 0, 0);
+                    // Hardware Glitch Filter: Reject physically impossible jumps in 10ms
+                    if (abs(dx) < 800 && abs(dy) < 800) {
+                        static float dx_accumulator = 0.0;
+                        static float dy_accumulator = 0.0;
+                        static int scroll_accumulator = 0;
+                        
+                        if (usb_hid.ready()) {
+                            if (w == 0 || w == 1) {
+                                // 2 or 3 fingers -> Scroll
+                                scroll_accumulator += (-dy); 
+                                
+                                int scroll = 0;
+                                int scroll_threshold = 120;
+                                
+                                if (scroll_accumulator >= scroll_threshold) {
+                                    scroll = 1;
+                                    scroll_accumulator -= scroll_threshold;
+                                } else if (scroll_accumulator <= -scroll_threshold) {
+                                    scroll = -1;
+                                    scroll_accumulator += scroll_threshold;
+                                }
+                                
+                                if (scroll != 0) {
+                                    usb_hid.mouseReport(1, buttons, 0, 0, scroll, 0);
+                                }
+                                
+                                dx_accumulator = 0.0;
+                                dy_accumulator = 0.0;
+                            } else {
+                                // 1 finger -> Move
+                                scroll_accumulator = 0; 
+                                
+                                dx_accumulator += (float)dx / 3.0f;
+                                dy_accumulator += (float)(-dy) / 3.0f;
+                                
+                                int send_dx = (int)dx_accumulator;
+                                int send_dy = (int)dy_accumulator;
+                                
+                                dx_accumulator -= send_dx;
+                                dy_accumulator -= send_dy;
+                                
+                                send_dx = max(-127, min(127, send_dx));
+                                send_dy = max(-127, min(127, send_dy));
+                                
+                                if (send_dx != 0 || send_dy != 0 || buttons != last_buttons) {
+                                    usb_hid.mouseReport(1, buttons, send_dx, send_dy, 0, 0);
+                                }
                             }
                         }
                     }
@@ -309,6 +314,7 @@ void loop() {
                 
                 last_x = x;
                 last_y = y;
+                last_w = w;
                 last_finger_down = true;
             } else {
                 diag_z = 0;
