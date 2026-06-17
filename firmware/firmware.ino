@@ -213,7 +213,6 @@ void loop() {
     static bool last_finger_down = false;
     static int last_x = 0;
     static int last_y = 0;
-    static int last_w = -1;
     static uint8_t last_buttons = 0;
 
     // Timeout resync
@@ -255,13 +254,17 @@ void loop() {
                 diag_z = z;
                 diag_w = w;
                 
-                // Only move if we didn't just add/remove a finger (w changed) 
-                if (last_finger_down && w == last_w) {
+                int current_fingers = (w == 0) ? 2 : ((w == 1) ? 3 : 1);
+                static int last_fingers = -1;
+                
+                // Only move if we didn't just add/remove a finger
+                if (last_finger_down && current_fingers == last_fingers) {
                     int dx = x - last_x;
                     int dy = y - last_y; // Y is bottom-to-top natively from trackpad
                     
                     // Hardware Glitch Filter: Reject physically impossible jumps in 10ms
-                    if (abs(dx) < 800 && abs(dy) < 800) {
+                    // Dropped to 250 because the logs showed massive jumps of 696 passing through!
+                    if (abs(dx) < 250 && abs(dy) < 250) {
                         static float dx_accumulator = 0.0;
                         static float dy_accumulator = 0.0;
                         static int scroll_accumulator = 0;
@@ -314,7 +317,7 @@ void loop() {
                 
                 last_x = x;
                 last_y = y;
-                last_w = w;
+                last_fingers = current_fingers;
                 last_finger_down = true;
             } else {
                 diag_z = 0;
