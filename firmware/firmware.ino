@@ -44,7 +44,7 @@ void fillScreen(uint16_t color) {
     }
 }
 
-Nokia105_128x160 display(20, 17, &SPI);
+Nokia105_128x160 display(16, 17, &SPI);
 
 // PS2 Ring Buffer
 #define BUF_SIZE 256
@@ -111,7 +111,7 @@ public:
         // This is called in setup1(), so the interrupt fires exclusively on Core 1!
         attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
         
-        delay(10);
+        delay(500); // Wait 500ms for trackpad to fully power on and boot up before sending commands!
         write(0xFF); // Reset
         delay(500);
         head = 0; tail = 0;
@@ -127,7 +127,8 @@ public:
         head = 0; tail = 0;
     }
 
-    void write(uint8_t data) {
+    // Safely write to PS2 with timeout to prevent complete hang if hardware is disconnected
+    bool write(uint8_t data) {
         detachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN));
         pinMode(PS2_CLK_PIN, OUTPUT);
         pinMode(PS2_DATA_PIN, OUTPUT);
@@ -138,26 +139,42 @@ public:
         digitalWrite(PS2_CLK_PIN, HIGH);
         pinMode(PS2_CLK_PIN, INPUT_PULLUP);
         
-        while (digitalRead(PS2_CLK_PIN) == HIGH);
+        unsigned long start = micros();
+        while (digitalRead(PS2_CLK_PIN) == HIGH) {
+            if (micros() - start > 10000) {
+                pinMode(PS2_DATA_PIN, INPUT_PULLUP);
+                attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
+                return false;
+            }
+        }
         
         bool parity = true;
         for (int i = 0; i < 8; i++) {
             digitalWrite(PS2_DATA_PIN, (data >> i) & 1);
             parity ^= ((data >> i) & 1);
-            while (digitalRead(PS2_CLK_PIN) == LOW);
-            while (digitalRead(PS2_CLK_PIN) == HIGH);
+            
+            start = micros();
+            while (digitalRead(PS2_CLK_PIN) == LOW) { if(micros() - start > 10000) break; }
+            start = micros();
+            while (digitalRead(PS2_CLK_PIN) == HIGH) { if(micros() - start > 10000) break; }
         }
         
         digitalWrite(PS2_DATA_PIN, parity);
-        while (digitalRead(PS2_CLK_PIN) == LOW);
-        while (digitalRead(PS2_CLK_PIN) == HIGH);
+        start = micros();
+        while (digitalRead(PS2_CLK_PIN) == LOW) { if(micros() - start > 10000) break; }
+        start = micros();
+        while (digitalRead(PS2_CLK_PIN) == HIGH) { if(micros() - start > 10000) break; }
         
         pinMode(PS2_DATA_PIN, INPUT_PULLUP);
-        while (digitalRead(PS2_DATA_PIN) == HIGH);
-        while (digitalRead(PS2_CLK_PIN) == LOW);
-        while (digitalRead(PS2_CLK_PIN) == HIGH);
+        start = micros();
+        while (digitalRead(PS2_DATA_PIN) == HIGH) { if(micros() - start > 10000) break; }
+        start = micros();
+        while (digitalRead(PS2_CLK_PIN) == LOW) { if(micros() - start > 10000) break; }
+        start = micros();
+        while (digitalRead(PS2_CLK_PIN) == HIGH) { if(micros() - start > 10000) break; }
         
         attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
+        return true;
     }
 
     int available() {
