@@ -14,6 +14,13 @@ uint8_t const desc_hid_report[] = {
 
 Adafruit_USBD_HID usb_hid;
 
+uint16_t get_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    return 0;
+}
+
+void set_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+}
+
 // Display globals
 uint16_t screen_buf[160 * 128];
 
@@ -47,7 +54,7 @@ void fillScreen(uint16_t color) {
 Nokia105_128x160 display(16, 17, &SPI);
 
 // PS2 Ring Buffer
-#define BUF_SIZE 256
+#define BUF_SIZE 512
 
 class PS2Mouse {
 private:
@@ -108,26 +115,24 @@ public:
         pinMode(PS2_CLK_PIN, INPUT_PULLUP);
         pinMode(PS2_DATA_PIN, INPUT_PULLUP);
         
-        // This is called in setup1(), so the interrupt fires exclusively on Core 1!
         attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
         
-        delay(500); // Wait 500ms for trackpad to fully power on and boot up before sending commands!
-        write(0xFF); // Reset
+        delay(500); 
+        
+        write(0xFF);
         delay(500);
         head = 0; tail = 0;
 
-        // Synaptics Magic Sequence for Absolute W-Mode (Mode Byte 0xC1)
         write(0xE8); write(0x03); 
         write(0xE8); write(0x00); 
         write(0xE8); write(0x00); 
         write(0xE8); write(0x01); 
         write(0xF3); write(0x14); 
-        write(0xF4); // Enable
+        write(0xF4); 
         delay(10);
         head = 0; tail = 0;
     }
 
-    // Safely write to PS2 with timeout to prevent complete hang if hardware is disconnected
     bool write(uint8_t data) {
         detachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN));
         pinMode(PS2_CLK_PIN, OUTPUT);
@@ -198,40 +203,14 @@ volatile int diag_y = 0;
 volatile int diag_z = 0;
 volatile int diag_w = 0;
 
-// ==========================================
-// CORE 0: Handles USB PTP Transmission ONLY
-// ==========================================
 void setup() {
     Serial.begin(115200);
     usb_hid.setPollInterval(2);
     usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
+    usb_hid.setReportCallback(get_report_callback, set_report_callback);
     usb_hid.begin();
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
-    // Notice: trackpad.begin() is moved to setup1() to isolate interrupts!
-}
-
-void loop() {
-    // Read hardware FIFO from Core 1
-    if (rp2040.fifo.available() > 0) {
-        uint32_t report = rp2040.fifo.pop();
-        
-        // Unpack the data
-        int8_t send_dx = report & 0xFF;
-        int8_t send_dy = (report >> 8) & 0xFF;
-        int8_t send_scroll = (report >> 16) & 0xFF;
-        uint8_t buttons = (report >> 24) & 0xFF;
-        
-        if (usb_hid.ready()) {
-            usb_hid.mouseReport(1, buttons, send_dx, send_dy, send_scroll, 0);
-        }
-    }
-}
-
-// ==========================================
-// CORE 1: Handles PS/2 Reading & Display
-// ==========================================
-void setup1() {
     SPI.setRX(4);
     SPI.setSCK(18);
     SPI.setTX(19);
@@ -243,12 +222,10 @@ void setup1() {
     fillScreen(0x0000);
     display.writeFrameRAM(screen_buf);
     
-    // Crucial fix: Initialize trackpad on Core 1! 
-    // This attaches the PS/2 clock interrupt to Core 1, completely isolating it from USB interrupts.
     trackpad.begin();
 }
 
-void loop1() {
+void loop() {
     static uint8_t packet[6];
     static int pkt_idx = 0;
     static unsigned long last_packet_time = 0;
@@ -276,8 +253,8 @@ void loop1() {
         pkt_idx++;
         
         if (pkt_idx == 6) {
-            bool physical_left = packet[0] & 0x02; // Bit 1 is Left
-            bool physical_right = packet[0] & 0x01; // Bit 0 is Right
+            bool physical_left = packet[0] & 0x02; 
+            bool physical_right = packet[0] & 0x01; 
             
             int x = packet[4] | ((packet[1] & 0x0F) << 8) | ((packet[3] & 0x10) << 8);
             int y = packet[5] | ((packet[1] & 0xF0) << 4) | ((packet[3] & 0x20) << 7);
@@ -308,19 +285,16 @@ void loop1() {
                         dx = x - last_x;
                         dy = y - last_y; 
                     } else if (current_fingers == 2 && last_fingers == 2) {
-                        // 2-Finger Alternating Coordinate Fix
                         dx = x - history_x[0];
                         dy = y - history_y[0];
                         
                         history_x[0] = history_x[1]; history_x[1] = x;
                         history_y[0] = history_y[1]; history_y[1] = y;
                     } else if (current_fingers == 2 && last_fingers != 2) {
-                        // Just transitioned to 2 fingers, prime the history buffers
                         history_x[0] = x; history_x[1] = x;
                         history_y[0] = y; history_y[1] = y;
                     }
                     
-                    // Native processing, NO glitch filters needed anymore!
                     static float dx_accumulator = 0.0;
                     static float dy_accumulator = 0.0;
                     static int scroll_accumulator = 0;
@@ -360,9 +334,9 @@ void loop1() {
                     }
                     
                     if (send_dx != 0 || send_dy != 0 || send_scroll != 0 || buttons != last_buttons) {
-                        // Pack data into 32-bit integer for hardware FIFO
-                        uint32_t report = (buttons << 24) | ((send_scroll & 0xFF) << 16) | ((send_dy & 0xFF) << 8) | (send_dx & 0xFF);
-                        rp2040.fifo.push(report);
+                        if (usb_hid.ready()) {
+                            usb_hid.mouseReport(1, buttons, send_dx, send_dy, send_scroll, 0);
+                        }
                     }
                 }
                 
@@ -376,8 +350,9 @@ void loop1() {
                 last_fingers = -1;
                 
                 if (buttons != last_buttons) {
-                    uint32_t report = (buttons << 24); // all zeroes for dx, dy, scroll
-                    rp2040.fifo.push(report);
+                    if (usb_hid.ready()) {
+                        usb_hid.mouseReport(1, buttons, 0, 0, 0, 0);
+                    }
                 }
             }
             
@@ -386,7 +361,7 @@ void loop1() {
         }
     }
     
-    // Display update (Running async on Core 1!)
+    // Display update
     static unsigned long last_disp = 0;
     if (millis() - last_disp > 10) {
         last_disp = millis();
