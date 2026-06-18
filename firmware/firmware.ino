@@ -41,24 +41,66 @@ void fadeScreen() {
 }
 
 // ==========================================
-// HID DESCRIPTOR: STANDARD MOUSE
+// HID DESCRIPTOR: HIGH RESOLUTION 16-BIT MOUSE
 // ==========================================
 uint8_t const desc_hid_report[] = {
-  TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(1))
+  HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP      ),
+  HID_USAGE      ( HID_USAGE_DESKTOP_MOUSE     ),
+  HID_COLLECTION ( HID_COLLECTION_APPLICATION  ),
+    HID_REPORT_ID( 1 )
+    HID_USAGE      ( HID_USAGE_DESKTOP_POINTER ),
+    HID_COLLECTION ( HID_COLLECTION_PHYSICAL   ),
+      HID_USAGE_PAGE  ( HID_USAGE_PAGE_BUTTON  ),
+      HID_USAGE_MIN   ( 1                                      ),
+      HID_USAGE_MAX   ( 5                                      ),
+      HID_LOGICAL_MIN ( 0                                      ),
+      HID_LOGICAL_MAX ( 1                                      ),
+      HID_REPORT_COUNT( 5                                      ),
+      HID_REPORT_SIZE ( 1                                      ),
+      HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ),
+      HID_REPORT_COUNT( 1                                      ),
+      HID_REPORT_SIZE ( 3                                      ),
+      HID_INPUT       ( HID_CONSTANT                           ),
+      HID_USAGE_PAGE  ( HID_USAGE_PAGE_DESKTOP ),
+      // 16-bit X, Y
+      HID_USAGE       ( HID_USAGE_DESKTOP_X                    ),
+      HID_USAGE       ( HID_USAGE_DESKTOP_Y                    ),
+      0x16, 0x00, 0x80, // Logical Minimum (-32768)
+      0x26, 0xFF, 0x7F, // Logical Maximum (32767)
+      HID_REPORT_COUNT( 2                                      ),
+      HID_REPORT_SIZE ( 16                                     ),
+      HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
+      // Vertical wheel scroll [-127, 127]
+      HID_USAGE       ( HID_USAGE_DESKTOP_WHEEL                ),
+      HID_LOGICAL_MIN ( 0x81                                   ),
+      HID_LOGICAL_MAX ( 0x7f                                   ),
+      HID_REPORT_COUNT( 1                                      ),
+      HID_REPORT_SIZE ( 8                                      ),
+      HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
+      // Horizontal wheel scroll [-127, 127]
+      HID_USAGE_PAGE  ( HID_USAGE_PAGE_CONSUMER ),
+      HID_USAGE_N     ( HID_USAGE_CONSUMER_AC_PAN, 2           ),
+      HID_LOGICAL_MIN ( 0x81                                   ),
+      HID_LOGICAL_MAX ( 0x7f                                   ),
+      HID_REPORT_COUNT( 1                                      ),
+      HID_REPORT_SIZE ( 8                                      ),
+      HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
+    HID_COLLECTION_END,
+  HID_COLLECTION_END
 };
 
-
+typedef struct TU_ATTR_PACKED {
+  uint8_t buttons;
+  int16_t x;
+  int16_t y;
+  int8_t  wheel;
+  int8_t  pan;
+} hid_mouse_report_16bit_t;
 
 Adafruit_USBD_HID usb_hid;
 
-// Standard HID callbacks
-uint16_t get_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
-  return 0;
-}
-
-void set_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-  // We can ignore SET_REPORT for now.
-}
+uint16_t get_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) { return 0; }
+void set_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {}
 
 // ==========================================
 // PS/2 HARWARE & PINS
@@ -71,8 +113,6 @@ private:
     volatile uint8_t bit_count = 0;
     volatile uint8_t incoming_byte = 0;
     volatile bool in_transmission = false;
-    
-    // Volatile circular buffer
     static const int BUF_SIZE = 64;
     volatile uint8_t buffer[BUF_SIZE];
     volatile int head = 0;
@@ -86,7 +126,6 @@ private:
 
     void handle_clk() {
         int data_bit = digitalRead(PS2_DATA_PIN);
-        
         if (!in_transmission) {
             if (data_bit == 0) {
                 in_transmission = true;
@@ -95,9 +134,7 @@ private:
             }
         } else {
             if (bit_count < 8) {
-                if (data_bit) {
-                    incoming_byte |= (1 << bit_count);
-                }
+                if (data_bit) incoming_byte |= (1 << bit_count);
                 bit_count++;
             } else if (bit_count == 8) {
                 bit_count++;
@@ -195,7 +232,6 @@ volatile int diag_w = 0;
 void setup() {
     Serial.begin(115200);
     
-    // Setup TinyUSB HID
     usb_hid.setPollInterval(2);
     usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
     usb_hid.setReportCallback(get_report_callback, set_report_callback);
@@ -215,6 +251,13 @@ void loop() {
     static int last_y = 0;
     static uint8_t last_buttons = 0;
     static int last_fingers = -1;
+    
+    // EMA & Accumulator for high-res tracking
+    static float ema_dx = 0.0f;
+    static float ema_dy = 0.0f;
+    static float dx_accumulator = 0.0f;
+    static float dy_accumulator = 0.0f;
+    static int scroll_accumulator = 0;
 
     // Timeout resync
     if (millis() - last_packet_time > 50) {
@@ -226,7 +269,6 @@ void loop() {
         last_packet_time = millis();
         packet[pkt_idx] = b;
         
-        // Strict Synaptics 6-byte Absolute W-Mode Sync
         if (pkt_idx == 0 && (b & 0xC8) != 0x80) continue;
         if (pkt_idx == 3 && (b & 0xC8) != 0xC0) { pkt_idx = 0; continue; }
         
@@ -242,12 +284,8 @@ void loop() {
             uint8_t buttons = 0;
             if (physical_left || digitalRead(BUTTON_PIN) == LOW) buttons |= MOUSE_BUTTON_LEFT;
             
-            // Update global vars for LCD Core 1
             if (z > 30) {
-                diag_x = x;
-                diag_y = 5924 - y;
-                diag_z = z;
-                diag_w = w;
+                diag_x = x; diag_y = 5924 - y; diag_z = z; diag_w = w;
                 
                 int current_fingers = (w == 0) ? 2 : ((w == 1) ? 3 : 1);
                 
@@ -263,17 +301,12 @@ void loop() {
                     } else if (current_fingers == 2 && last_fingers == 2) {
                         dx = x - history_x[0];
                         dy = y - history_y[0];
-                        
                         history_x[0] = history_x[1]; history_x[1] = x;
                         history_y[0] = history_y[1]; history_y[1] = y;
                     } else if (current_fingers == 2 && last_fingers != 2) {
                         history_x[0] = x; history_x[1] = x;
                         history_y[0] = y; history_y[1] = y;
                     }
-                    
-                    static float dx_accumulator = 0.0;
-                    static float dy_accumulator = 0.0;
-                    static int scroll_accumulator = 0;
                     
                     int send_dx = 0;
                     int send_dy = 0;
@@ -282,36 +315,44 @@ void loop() {
                     if (current_fingers == 2 || current_fingers == 3) {
                         scroll_accumulator += (-dy); 
                         
-                        int scroll_threshold = 120;
-                        if (scroll_accumulator >= scroll_threshold) {
-                            send_scroll = 1;
-                            scroll_accumulator -= scroll_threshold;
-                        } else if (scroll_accumulator <= -scroll_threshold) {
-                            send_scroll = -1;
-                            scroll_accumulator += scroll_threshold;
+                        // High responsiveness multi-tick scroll
+                        int scroll_threshold = 40;
+                        if (abs(scroll_accumulator) >= scroll_threshold) {
+                            send_scroll = scroll_accumulator / scroll_threshold;
+                            scroll_accumulator -= send_scroll * scroll_threshold;
                         }
                         
-                        dx_accumulator = 0.0;
-                        dy_accumulator = 0.0;
+                        // Reset EMA when scrolling
+                        ema_dx = 0.0f; ema_dy = 0.0f;
+                        dx_accumulator = 0.0f; dy_accumulator = 0.0f;
                     } else if (current_fingers == 1) {
                         scroll_accumulator = 0; 
                         
-                        dx_accumulator += (float)dx / 3.0f;
-                        dy_accumulator += (float)(-dy) / 3.0f;
+                        // EMA Low-Pass Filter to eliminate 1-pixel static jitter
+                        float alpha = 0.6f;
+                        ema_dx = (alpha * dx) + ((1.0f - alpha) * ema_dx);
+                        ema_dy = (alpha * (-dy)) + ((1.0f - alpha) * ema_dy);
+                        
+                        dx_accumulator += ema_dx;
+                        dy_accumulator += ema_dy;
                         
                         send_dx = (int)dx_accumulator;
                         send_dy = (int)dy_accumulator;
                         
                         dx_accumulator -= send_dx;
                         dy_accumulator -= send_dy;
-                        
-                        send_dx = max(-127, min(127, send_dx));
-                        send_dy = max(-127, min(127, send_dy));
                     }
                     
                     if (send_dx != 0 || send_dy != 0 || send_scroll != 0 || buttons != last_buttons) {
                         if (usb_hid.ready()) {
-                            usb_hid.mouseReport(1, buttons, send_dx, send_dy, send_scroll, 0);
+                            hid_mouse_report_16bit_t report = {
+                                .buttons = buttons,
+                                .x = (int16_t)send_dx,
+                                .y = (int16_t)send_dy,
+                                .wheel = (int8_t)send_scroll,
+                                .pan = 0
+                            };
+                            usb_hid.sendReport(1, &report, sizeof(report));
                         }
                     }
                 }
@@ -324,9 +365,21 @@ void loop() {
                 diag_z = 0;
                 last_finger_down = false;
                 last_fingers = -1;
+                ema_dx = 0.0f;
+                ema_dy = 0.0f;
+                dx_accumulator = 0.0f;
+                dy_accumulator = 0.0f;
+                scroll_accumulator = 0;
                 
                 if (buttons != last_buttons && usb_hid.ready()) {
-                    usb_hid.mouseReport(1, buttons, 0, 0, 0, 0);
+                    hid_mouse_report_16bit_t report = {
+                        .buttons = buttons,
+                        .x = 0,
+                        .y = 0,
+                        .wheel = 0,
+                        .pan = 0
+                    };
+                    usb_hid.sendReport(1, &report, sizeof(report));
                 }
             }
             
