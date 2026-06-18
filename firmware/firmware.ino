@@ -315,10 +315,14 @@ void loop() {
                     if (current_fingers == 2 || current_fingers == 3) {
                         scroll_accumulator += (-dy); 
                         
-                        // High responsiveness multi-tick scroll
-                        int scroll_threshold = 40;
+                        // High responsiveness smooth scroll
+                        int scroll_threshold = 90;
                         if (abs(scroll_accumulator) >= scroll_threshold) {
                             send_scroll = scroll_accumulator / scroll_threshold;
+                            
+                            // Limit scroll to 1 tick per packet to prevent massive jumping
+                            send_scroll = max(-1, min(1, send_scroll));
+                            
                             scroll_accumulator -= send_scroll * scroll_threshold;
                         }
                         
@@ -333,8 +337,13 @@ void loop() {
                         ema_dx = (alpha * dx) + ((1.0f - alpha) * ema_dx);
                         ema_dy = (alpha * (-dy)) + ((1.0f - alpha) * ema_dy);
                         
-                        dx_accumulator += ema_dx;
-                        dy_accumulator += ema_dy;
+                        // DPI Scaling Factor
+                        // Lower value = slower pointer (lower DPI).
+                        // High-res sub-pixels are perfectly preserved by the accumulator!
+                        float dpi_scale = 0.25f; 
+                        
+                        dx_accumulator += ema_dx * dpi_scale;
+                        dy_accumulator += ema_dy * dpi_scale;
                         
                         send_dx = (int)dx_accumulator;
                         send_dy = (int)dy_accumulator;
