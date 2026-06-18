@@ -44,7 +44,7 @@ void fadeScreen() {
 // HID DESCRIPTOR: STANDARD MOUSE
 // ==========================================
 uint8_t const desc_hid_report[] = {
-  TUD_HID_REPORT_DESC_MOUSE()
+  TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(1))
 };
 
 
