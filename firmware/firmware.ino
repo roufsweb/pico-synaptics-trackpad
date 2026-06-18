@@ -115,9 +115,7 @@ public:
         pinMode(PS2_CLK_PIN, INPUT_PULLUP);
         pinMode(PS2_DATA_PIN, INPUT_PULLUP);
         
-        attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
-        
-        delay(500); 
+        delay(500);
         
         write(0xFF);
         delay(500);
@@ -131,10 +129,11 @@ public:
         write(0xF4); 
         delay(10);
         head = 0; tail = 0;
+        
+        attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
     }
 
-    bool write(uint8_t data) {
-        detachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN));
+    void write(uint8_t data) {
         pinMode(PS2_CLK_PIN, OUTPUT);
         pinMode(PS2_DATA_PIN, OUTPUT);
         
@@ -144,42 +143,24 @@ public:
         digitalWrite(PS2_CLK_PIN, HIGH);
         pinMode(PS2_CLK_PIN, INPUT_PULLUP);
         
-        unsigned long start = micros();
-        while (digitalRead(PS2_CLK_PIN) == HIGH) {
-            if (micros() - start > 10000) {
-                pinMode(PS2_DATA_PIN, INPUT_PULLUP);
-                attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
-                return false;
-            }
-        }
+        while (digitalRead(PS2_CLK_PIN) == HIGH);
         
         bool parity = true;
         for (int i = 0; i < 8; i++) {
             digitalWrite(PS2_DATA_PIN, (data >> i) & 1);
             parity ^= ((data >> i) & 1);
-            
-            start = micros();
-            while (digitalRead(PS2_CLK_PIN) == LOW) { if(micros() - start > 10000) break; }
-            start = micros();
-            while (digitalRead(PS2_CLK_PIN) == HIGH) { if(micros() - start > 10000) break; }
+            while (digitalRead(PS2_CLK_PIN) == LOW);
+            while (digitalRead(PS2_CLK_PIN) == HIGH);
         }
         
         digitalWrite(PS2_DATA_PIN, parity);
-        start = micros();
-        while (digitalRead(PS2_CLK_PIN) == LOW) { if(micros() - start > 10000) break; }
-        start = micros();
-        while (digitalRead(PS2_CLK_PIN) == HIGH) { if(micros() - start > 10000) break; }
+        while (digitalRead(PS2_CLK_PIN) == LOW);
+        while (digitalRead(PS2_CLK_PIN) == HIGH);
         
         pinMode(PS2_DATA_PIN, INPUT_PULLUP);
-        start = micros();
-        while (digitalRead(PS2_DATA_PIN) == HIGH) { if(micros() - start > 10000) break; }
-        start = micros();
-        while (digitalRead(PS2_CLK_PIN) == LOW) { if(micros() - start > 10000) break; }
-        start = micros();
-        while (digitalRead(PS2_CLK_PIN) == HIGH) { if(micros() - start > 10000) break; }
-        
-        attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
-        return true;
+        while (digitalRead(PS2_DATA_PIN) == HIGH);
+        while (digitalRead(PS2_CLK_PIN) == LOW);
+        while (digitalRead(PS2_CLK_PIN) == HIGH);
     }
 
     int available() {
@@ -236,7 +217,6 @@ void loop() {
     static uint8_t last_buttons = 0;
     static int last_fingers = -1;
 
-    // Timeout resync
     if (millis() - last_packet_time > 50) {
         pkt_idx = 0;
     }
@@ -246,7 +226,6 @@ void loop() {
         last_packet_time = millis();
         packet[pkt_idx] = b;
         
-        // Strict Synaptics 6-byte Absolute W-Mode Sync
         if (pkt_idx == 0 && (b & 0xC8) != 0x80) continue;
         if (pkt_idx == 3 && (b & 0xC8) != 0xC0) { pkt_idx = 0; continue; }
         

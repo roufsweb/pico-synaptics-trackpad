@@ -1,33 +1,30 @@
-# Synaptics PS/2 Trackpad to USB HID Adapter (Raspberry Pi Pico)
+# Laptop Trackpad Reuse Project
 
-This project uses a Raspberry Pi Pico (RP2040) to convert an old laptop Synaptics PS/2 trackpad into a standard USB mouse. It supports multi-finger gestures like two-finger scrolling and uses a high-resolution sub-pixel tracking algorithm to guarantee perfectly smooth cursor movement.
+This project repurposes a laptop Synaptics PS/2 trackpad into a standalone USB HID trackpad using a Raspberry Pi Pico (RP2040) or ESP32-S2. It features a Nokia 105 (128x160) LCD display that visualizes the trackpad touches in real-time.
 
-Additionally, this project drives an ST7735 SPI display to visualize the touch data in real-time, showing coordinates and multi-touch states.
+## Hardware Used
+- **Microcontroller**: Raspberry Pi Pico (or ESP32-S2 Mini)
+- **Trackpad**: Synaptics PS/2 Trackpad
+- **Display**: Nokia 105 LCD (128x160 pixels, SPI)
 
-## Hardware Required
-1. Raspberry Pi Pico (RP2040)
-2. Synaptics PS/2 Trackpad (extracted from an old laptop)
-3. ST7735 SPI Display (Optional, for visual debugging)
-4. Push Button (for left click)
+## Pin Wiring (Raspberry Pi Pico)
+| Component | Pin Function | Pico Pin |
+|-----------|--------------|----------|
+| Trackpad  | PS2 Clock    | GPIO 10  |
+| Trackpad  | PS2 Data     | GPIO 11  |
+| Display   | SCK          | GPIO 18  |
+| Display   | MOSI/TX      | GPIO 19  |
+| Display   | RST          | GPIO 16  |
+| Display   | CS           | GPIO 17  |
+| Button    | Left Click   | GPIO 15  |
 
-## Pinout
-- **PS/2 Clock:** GPIO 10
-- **PS/2 Data:** GPIO 11
-- **Left Click Button:** GPIO 15
-- **ST7735 SPI SCK:** GPIO 18
-- **ST7735 SPI TX (MOSI):** GPIO 19
-- **ST7735 SPI CS:** GPIO 17
-- **ST7735 SPI DC:** GPIO 16
-- **ST7735 SPI RST:** GPIO 20
+## Software Architecture
+The firmware is designed to be highly portable and purely **single-core**, allowing it to be compiled and run seamlessly on the RP2040 (Pico) and the single-core **ESP32-S2 Mini**.
 
-## Software Setup
-1. Install the Arduino IDE.
-2. Install the **Earle F. Philhower RP2040 core** in the Boards Manager.
-3. Install the **Adafruit ST7735 and ST7789 Library** and **Adafruit GFX Library**.
-4. In the `Tools` menu, set the USB Stack to **"Adafruit TinyUSB"**.
-5. Compile and flash the Pico.
+- **Interrupt-Driven PS/2**: The trackpad communicates via PS/2 using `attachInterrupt`. A large circular buffer holds incoming bits to ensure no data is lost even when the main loop is blocked by SPI display updates.
+- **Absolute W-Mode Processing**: The trackpad is initialized into Synaptics Absolute W-Mode, which transmits exact X/Y coordinates and pressure (Z) values.
+- **Native 2-Finger Support**: Complex multi-touch parsing allows for perfect 2-finger scrolling without any jitter or skipping.
+- **TinyUSB HID**: The microcontroller acts as a composite USB device using the Adafruit TinyUSB library, reporting standard mouse movements and clicks.
 
-## Features
-- **High Resolution Tracking:** Reads the raw 13-bit (5000x5000) absolute coordinate data from the Synaptics sensor and accumulates fractional movements so no sub-pixel data is lost.
-- **Two-Finger Scroll:** Detects multi-touch state and translates physical vertical drag into standard USB scroll wheel events.
-- **Visualizer:** Real-time visual heat map of your finger position on the LCD display.
+## Future Plans
+- Adding configurable DPI.
