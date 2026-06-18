@@ -258,6 +258,7 @@ void loop() {
     static float dx_accumulator = 0.0f;
     static float dy_accumulator = 0.0f;
     static int scroll_accumulator = 0;
+    static unsigned long last_scroll_time = 0;
 
     // Timeout resync
     if (millis() - last_packet_time > 50) {
@@ -314,6 +315,7 @@ void loop() {
                     
                     if (current_fingers == 2 || current_fingers == 3) {
                         scroll_accumulator += (-dy); 
+                        last_scroll_time = millis(); 
                         
                         // High responsiveness smooth scroll
                         int scroll_threshold = 90;
@@ -332,18 +334,23 @@ void loop() {
                     } else if (current_fingers == 1) {
                         scroll_accumulator = 0; 
                         
-                        // EMA Low-Pass Filter to eliminate 1-pixel static jitter
-                        float alpha = 0.6f;
+                        // Scroll lift-off debounce: ignore jump when lifting 2 fingers
+                        if (millis() - last_scroll_time < 150) {
+                            dx = 0;
+                            dy = 0;
+                        }
+                        
+                        // EMA Low-Pass Filter to eliminate 1-pixel static jitter and smooth movement
+                        float alpha = 0.35f; // Lowered to 0.35f for heavier smoothing
                         ema_dx = (alpha * dx) + ((1.0f - alpha) * ema_dx);
                         ema_dy = (alpha * (-dy)) + ((1.0f - alpha) * ema_dy);
                         
-                        // DPI Scaling Factor
-                        // Lower value = slower pointer (lower DPI).
-                        // High-res sub-pixels are perfectly preserved by the accumulator!
-                        float dpi_scale = 0.25f; 
+                        // Independent DPI Scaling to balance X and Y axis physical sensitivity
+                        float dpi_scale_x = 0.22f; 
+                        float dpi_scale_y = 0.32f; 
                         
-                        dx_accumulator += ema_dx * dpi_scale;
-                        dy_accumulator += ema_dy * dpi_scale;
+                        dx_accumulator += ema_dx * dpi_scale_x;
+                        dy_accumulator += ema_dy * dpi_scale_y;
                         
                         send_dx = (int)dx_accumulator;
                         send_dy = (int)dy_accumulator;
