@@ -1,28 +1,21 @@
+#include <Arduino.h>
 #include <SPI.h>
+#include <Adafruit_TinyUSB.h>
 #include "Nokia105_128x160.h"
-#include "Adafruit_TinyUSB.h"
 
-// Trackpad pins
-#define PS2_CLK_PIN 10
-#define PS2_DATA_PIN 11
+#define PIN_RESET 16
+#define PIN_CS    17
 #define BUTTON_PIN 15
 
-// HID Report Descriptor
-uint8_t const desc_hid_report[] = {
-  TUD_HID_REPORT_DESC_MOUSE()
-};
+// Hardware SPI Pins for RP2040: SDA(TX) = 19, SCK = 18, RX = 4
+Nokia105_128x160 display(PIN_RESET, PIN_CS, &SPI);
+uint16_t screen_buf[20480];
 
-Adafruit_USBD_HID usb_hid;
-
-uint16_t get_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
-    return 0;
+void fillScreen(uint16_t color) {
+    for (int i = 0; i < 20480; i++) {
+        screen_buf[i] = color;
+    }
 }
-
-void set_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-}
-
-// Display globals
-uint16_t screen_buf[160 * 128];
 
 void drawPixel(int x, int y, uint16_t color) {
     if (x >= 0 && x < 160 && y >= 0 && y < 128) {
@@ -31,82 +24,92 @@ void drawPixel(int x, int y, uint16_t color) {
 }
 
 void fadeScreen() {
-    for (int i = 0; i < 160 * 128; i++) {
+    for (int i = 0; i < 20480; i++) {
         uint16_t c = screen_buf[i];
         if (c != 0) {
-            uint8_t r = (c >> 11) & 0x1F;
-            uint8_t g = (c >> 5) & 0x3F;
-            uint8_t b = c & 0x1F;
+            uint16_t r = (c >> 11) & 0x1F;
+            uint16_t g = (c >> 5) & 0x3F;
+            uint16_t b = c & 0x1F;
+            
             if (r > 0) r--;
-            if (g > 1) g -= 2;
+            if (g > 1) g -= 2; else if (g > 0) g--;
             if (b > 0) b--;
+            
             screen_buf[i] = (r << 11) | (g << 5) | b;
         }
     }
 }
 
-void fillScreen(uint16_t color) {
-    for (int i = 0; i < 160 * 128; i++) {
-        screen_buf[i] = color;
-    }
+// ==========================================
+// HID DESCRIPTOR: STANDARD MOUSE
+// ==========================================
+uint8_t const desc_hid_report[] = {
+  TUD_HID_REPORT_DESC_MOUSE()
+};
+
+
+
+Adafruit_USBD_HID usb_hid;
+
+// Standard HID callbacks
+uint16_t get_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+  return 0;
 }
 
-Nokia105_128x160 display(16, 17, &SPI);
+void set_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+  // We can ignore SET_REPORT for now.
+}
 
-// PS2 Ring Buffer
-#define BUF_SIZE 512
+// ==========================================
+// PS/2 HARWARE & PINS
+// ==========================================
+#define PS2_DATA_PIN 11
+#define PS2_CLK_PIN 10
 
 class PS2Mouse {
 private:
+    volatile uint8_t bit_count = 0;
+    volatile uint8_t incoming_byte = 0;
+    volatile bool in_transmission = false;
+    
+    // Volatile circular buffer
+    static const int BUF_SIZE = 64;
+    volatile uint8_t buffer[BUF_SIZE];
     volatile int head = 0;
     volatile int tail = 0;
-    volatile uint8_t buffer[BUF_SIZE];
-    
-    volatile int bit_count = 0;
-    volatile uint8_t current_byte = 0;
-    volatile uint8_t parity = 0;
-    volatile unsigned long last_time = 0;
 
     static PS2Mouse* instance;
 
     static void clk_isr() {
-        if (instance == nullptr) return;
+        if (instance) instance->handle_clk();
+    }
+
+    void handle_clk() {
+        int data_bit = digitalRead(PS2_DATA_PIN);
         
-        unsigned long now = micros();
-        if (now - instance->last_time > 2000) {
-            instance->bit_count = 0;
-            instance->current_byte = 0;
-            instance->parity = 0;
-        }
-        instance->last_time = now;
-        
-        int val = digitalRead(PS2_DATA_PIN);
-        
-        if (instance->bit_count == 0) {
-            if (val != LOW) {
-                instance->bit_count = 0;
-                return;
+        if (!in_transmission) {
+            if (data_bit == 0) {
+                in_transmission = true;
+                bit_count = 0;
+                incoming_byte = 0;
             }
-        } else if (instance->bit_count >= 1 && instance->bit_count <= 8) {
-            instance->current_byte |= (val << (instance->bit_count - 1));
-            instance->parity ^= val;
-        } else if (instance->bit_count == 9) {
-            if (val != (1 - instance->parity)) {
-                instance->bit_count = 0;
-                return;
-            }
-        } else if (instance->bit_count == 10) {
-            if (val == HIGH) {
-                int next_head = (instance->head + 1) % BUF_SIZE;
-                if (next_head != instance->tail) {
-                    instance->buffer[instance->head] = instance->current_byte;
-                    instance->head = next_head;
+        } else {
+            if (bit_count < 8) {
+                if (data_bit) {
+                    incoming_byte |= (1 << bit_count);
                 }
+                bit_count++;
+            } else if (bit_count == 8) {
+                bit_count++;
+            } else if (bit_count == 9) {
+                int next_head = (head + 1) % BUF_SIZE;
+                if (next_head != tail) {
+                    buffer[head] = incoming_byte;
+                    head = next_head;
+                }
+                in_transmission = false;
             }
-            instance->bit_count = -1; 
         }
-        
-        instance->bit_count++;
     }
 
 public:
@@ -114,26 +117,26 @@ public:
         instance = this;
         pinMode(PS2_CLK_PIN, INPUT_PULLUP);
         pinMode(PS2_DATA_PIN, INPUT_PULLUP);
+        attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
         
-        delay(500);
-        
-        write(0xFF);
+        delay(10);
+        write(0xFF); // Reset
         delay(500);
         head = 0; tail = 0;
 
+        // Synaptics Magic Sequence for Absolute W-Mode (Mode Byte 0xC1)
         write(0xE8); write(0x03); 
         write(0xE8); write(0x00); 
         write(0xE8); write(0x00); 
         write(0xE8); write(0x01); 
         write(0xF3); write(0x14); 
-        write(0xF4); 
+        write(0xF4); // Enable
         delay(10);
         head = 0; tail = 0;
-        
-        attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
     }
 
     void write(uint8_t data) {
+        detachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN));
         pinMode(PS2_CLK_PIN, OUTPUT);
         pinMode(PS2_DATA_PIN, OUTPUT);
         
@@ -161,6 +164,8 @@ public:
         while (digitalRead(PS2_DATA_PIN) == HIGH);
         while (digitalRead(PS2_CLK_PIN) == LOW);
         while (digitalRead(PS2_CLK_PIN) == HIGH);
+        
+        attachInterrupt(digitalPinToInterrupt(PS2_CLK_PIN), clk_isr, FALLING);
     }
 
     int available() {
@@ -184,25 +189,19 @@ volatile int diag_y = 0;
 volatile int diag_z = 0;
 volatile int diag_w = 0;
 
+// ==========================================
+// CORE 0: Handles PS/2 & USB PTP
+// ==========================================
 void setup() {
     Serial.begin(115200);
+    
+    // Setup TinyUSB HID
     usb_hid.setPollInterval(2);
     usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
     usb_hid.setReportCallback(get_report_callback, set_report_callback);
     usb_hid.begin();
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
-    
-    SPI.setRX(4);
-    SPI.setSCK(18);
-    SPI.setTX(19);
-    SPI.begin();
-    SPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
-    display.begin();
-    display.setRotation(1);
 
-    fillScreen(0x0000);
-    display.writeFrameRAM(screen_buf);
-    
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
     trackpad.begin();
 }
 
@@ -217,6 +216,7 @@ void loop() {
     static uint8_t last_buttons = 0;
     static int last_fingers = -1;
 
+    // Timeout resync
     if (millis() - last_packet_time > 50) {
         pkt_idx = 0;
     }
@@ -226,15 +226,14 @@ void loop() {
         last_packet_time = millis();
         packet[pkt_idx] = b;
         
+        // Strict Synaptics 6-byte Absolute W-Mode Sync
         if (pkt_idx == 0 && (b & 0xC8) != 0x80) continue;
         if (pkt_idx == 3 && (b & 0xC8) != 0xC0) { pkt_idx = 0; continue; }
         
         pkt_idx++;
         
         if (pkt_idx == 6) {
-            bool physical_left = packet[0] & 0x02; 
-            bool physical_right = packet[0] & 0x01; 
-            
+            bool physical_left = packet[0] & 0x01;
             int x = packet[4] | ((packet[1] & 0x0F) << 8) | ((packet[3] & 0x10) << 8);
             int y = packet[5] | ((packet[1] & 0xF0) << 4) | ((packet[3] & 0x20) << 7);
             int z = packet[2];
@@ -242,11 +241,9 @@ void loop() {
             
             uint8_t buttons = 0;
             if (physical_left || digitalRead(BUTTON_PIN) == LOW) buttons |= MOUSE_BUTTON_LEFT;
-            if (physical_right) buttons |= MOUSE_BUTTON_RIGHT;
             
-            bool is_touching = (z > 30) || (last_finger_down && z > 15);
-            
-            if (is_touching) {
+            // Update global vars for LCD Core 1
+            if (z > 30) {
                 diag_x = x;
                 diag_y = 5924 - y;
                 diag_z = z;
@@ -328,10 +325,8 @@ void loop() {
                 last_finger_down = false;
                 last_fingers = -1;
                 
-                if (buttons != last_buttons) {
-                    if (usb_hid.ready()) {
-                        usb_hid.mouseReport(1, buttons, 0, 0, 0, 0);
-                    }
+                if (buttons != last_buttons && usb_hid.ready()) {
+                    usb_hid.mouseReport(1, buttons, 0, 0, 0, 0);
                 }
             }
             
@@ -339,33 +334,47 @@ void loop() {
             pkt_idx = 0;
         }
     }
+}
+
+// ==========================================
+// CORE 1: Handles SPI Display Output
+// ==========================================
+void setup1() {
+    SPI.setRX(4);
+    SPI.setSCK(18);
+    SPI.setTX(19);
+    SPI.begin();
+    SPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
+    display.begin();
+    display.setRotation(1);
+
+    fillScreen(0x0000);
+    display.writeFrameRAM(screen_buf);
+}
+
+void loop1() {
+    fadeScreen();
     
-    // Display update
-    static unsigned long last_disp = 0;
-    if (millis() - last_disp > 10) {
-        last_disp = millis();
-        fadeScreen();
+    if (diag_z > 30) {
+        int cx = map(diag_x, 1200, 5600, 0, 159);
+        int cy = map(diag_y, 0, 5924, 0, 127); // mapped with inverted Y
         
-        if (diag_z > 30) {
-            int cx = map(diag_x, 1200, 5600, 0, 159);
-            int cy = map(diag_y, 0, 5924, 0, 127); 
-            
-            if (cx < 0) cx = 0; if (cx > 159) cx = 159;
-            if (cy < 0) cy = 0; if (cy > 127) cy = 127;
-            
-            uint16_t color;
-            if (diag_w >= 4) color = 0xFFFF;      
-            else if (diag_w == 0) color = 0x07E0; 
-            else if (diag_w == 1) color = 0x001F; 
-            else color = 0xF800;                  
-            
-            for(int dx=-1; dx<=1; dx++) {
-                for(int dy=-1; dy<=1; dy++) {
-                    drawPixel(cx+dx, cy+dy, color);
-                }
+        if (cx < 0) cx = 0; if (cx > 159) cx = 159;
+        if (cy < 0) cy = 0; if (cy > 127) cy = 127;
+        
+        uint16_t color;
+        if (diag_w >= 4) color = 0xFFFF;      
+        else if (diag_w == 0) color = 0x07E0; 
+        else if (diag_w == 1) color = 0x001F; 
+        else color = 0xF800;                  
+        
+        for(int dx=-1; dx<=1; dx++) {
+            for(int dy=-1; dy<=1; dy++) {
+                drawPixel(cx+dx, cy+dy, color);
             }
         }
-        
-        display.writeFrameRAM(screen_buf);
     }
+    
+    display.writeFrameRAM(screen_buf);
+    delay(10);
 }
